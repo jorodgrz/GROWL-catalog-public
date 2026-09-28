@@ -7,7 +7,7 @@ def get_COMPAS_vars(compas_file, group, variables, mask=None):
 
     Parameters
     ----------
-    input_file : `hdf5 File`
+    compas_file : `hdf5 File`
         COMPAS file
     group : `str`
         Group within COMPAS file
@@ -37,20 +37,24 @@ def get_COMPAS_vars(compas_file, group, variables, mask=None):
     return var_list
 
 
+RLOF_COLUMNS = ["SEED", "MT_Event_Counter", "RLOF(1)>MT", "RLOF(2)>MT", "CEE>MT",
+                "Stellar_Type(1)<MT", "Stellar_Type(2)<MT"]
+
 
 def identify_formation_channels(seeds, file):
-    """Identify the formation channel that produced each seed. We consider 5
-    main channels: classic, only stable, single core CEE, double core CEE and
-    other. We define the channels as follows (the numbers are what is put in
-    the ``channels`` output):
+    """Identify the formation channel that produced each seed, following the
+    definitions of Broekgaarden et al. (2021, MNRAS 508, 5028; arXiv:2103.02608),
+    section 3.1. The primary is the initially more massive star (star 1). The
+    numbers are what is put in the ``channels`` output:
 
     Classic (1) -- In the first mass transfer, the primary overflows its
     Roche lobe stably and has a clear core-envelope structure (HG - TPAGB)
-    whilst the secondary star is still on the main sequence. In the second mass
-    transfer, the secondary overflows its Roche Lobe before stripping occurs
-    and leads to a common envelope event.
+    whilst the secondary star is still on the main sequence. The first mass
+    transfer from the secondary afterwards starts before the secondary is
+    stripped and leads to a common envelope event.
 
-    Only stable (2) -- As Classic, but the second mass transfer is stable.
+    Only stable (2) -- The first mass transfer is as in Classic, and the binary
+    never goes through a common envelope.
 
     Single core CEE (3) -- In the first mass transfer, the primary overflows
     its Roche lobe unstably (leading to a CEE) and has a clear core-envelope
@@ -61,7 +65,11 @@ def identify_formation_channels(seeds, file):
     its Roche lobe unstably (leading to a CEE) and both the primary and
     secondary have a clear core-envelope structure (FGB - TPAGB).
 
-    Other (5) -- Anything else
+    Other -- Anything else, e.g. case A mass transfer (primary still on the
+    main sequence), or the primary collapsing before any mass transfer:
+    -1 if the binary had a CE, -2 if it did not.
+
+    Chemically homogeneous binaries are not separated; they end up in Other.
 
     Parameters
     ----------
@@ -69,123 +77,97 @@ def identify_formation_channels(seeds, file):
         List of seeds that each correspond to a binary (this should be a subset
         of the seeds in the COMPAS output file)
     file : `hdf5 File`
-        An open hdf5 file (returned by h5py.File) with the COMPAS output
+        An open hdf5 file (returned by h5py.File) with the COMPAS output. Its
+        BSE_RLOF group needs the columns in ``RLOF_COLUMNS``.
 
     Returns
     -------
     channels : `int/array`
         List of channels through with each binary formed
     """
+    seeds = np.asarray(seeds)
+    missing = [c for c in RLOF_COLUMNS if c not in file["BSE_RLOF"]]
+    if missing:
+        raise KeyError(f"BSE_RLOF is missing {missing}, which are needed to "
+                       "identify the formation channels")
+
     all_rlof_seeds = get_COMPAS_vars(file, "BSE_RLOF", "SEED")
     rlof_mask = np.isin(all_rlof_seeds, seeds)
-    rlof_seeds = all_rlof_seeds[rlof_mask]
+    rlof_seed, count, rlof_primary, rlof_secondary, cee_flag, \
+        stellar_type_1, stellar_type_2 = get_COMPAS_vars(file, "BSE_RLOF",
+                                                         RLOF_COLUMNS, rlof_mask)
 
-    count, rlof_primary, rlof_secondary, cee_flag,\
-        stellar_type_1, stellar_type_2 = get_COMPAS_vars(file,
-                                                         "BSE_RLOF",
-                                                         ["MT_Event_Counter",
-                                                          "RLOF(1)>MT",
-                                                          "RLOF(2)>MT",
-                                                          "CEE>MT",
-                                                          "Stellar_Type(1)<MT",
-                                                          "Stellar_Type(2)<MT"],
-                                                         rlof_mask)
+    # one entry per mass-transfer episode (an episode can span several rows):
+    # stellar types from its first row, flags set if set in any of its rows
+    order = np.lexsort((count, rlof_seed))
+    rlof_seed, count = rlof_seed[order], count[order]
+    new_episode = np.r_[True, (rlof_seed[1:] != rlof_seed[:-1])
+                        | (count[1:] != count[:-1])]
+    starts = np.flatnonzero(new_episode)
+    ep_seed, ep_count = rlof_seed[starts], count[starts]
+    ep_primary = np.maximum.reduceat(rlof_primary[order].astype(int), starts) > 0
+    ep_secondary = np.maximum.reduceat(rlof_secondary[order].astype(int), starts) > 0
+    ep_cee = np.maximum.reduceat(cee_flag[order].astype(int), starts) > 0
+    ep_type_1 = stellar_type_1[order][starts]
+    ep_type_2 = stellar_type_2[order][starts]
 
-    # CLASSIC channel
+    # the first episode of each binary (episodes are sorted by seed, then count)
+    first = np.r_[True, ep_seed[1:] != ep_seed[:-1]]
+    mt1_seed = ep_seed[first]
+    mt1_primary, mt1_cee = ep_primary[first], ep_cee[first]
+    mt1_type_1, mt1_type_2 = ep_type_1[first], ep_type_2[first]
+
+    cee_seeds = np.unique(ep_seed[ep_cee])
+
+    # CLASSIC and ONLY STABLE channels
     # 1st transfer, stable RLOF from primary (post-MS, unstripped) onto MS
-    classic_or_OS_MT1 = np.logical_and.reduce((count == 1,
-                                               rlof_primary,
-                                               np.logical_not(cee_flag),
-                                               stellar_type_1 > 1,
-                                               stellar_type_1 < 7,
-                                               stellar_type_2 <= 1))
-    # 2nd transfer, unstripped secondary RLOF into CE
-    classic_MT2 = np.logical_and.reduce((count == 2,
-                                         rlof_secondary,
-                                         cee_flag,
-                                         stellar_type_2 < 7))
-    classic_seeds = np.intersect1d(rlof_seeds[classic_or_OS_MT1],
-                                   rlof_seeds[classic_MT2])
+    classic_or_OS_MT1 = np.logical_and.reduce((mt1_primary,
+                                               np.logical_not(mt1_cee),
+                                               mt1_type_1 > 1,
+                                               mt1_type_1 < 7,
+                                               mt1_type_2 <= 1))
+    classic_or_OS_seeds = mt1_seed[classic_or_OS_MT1]
+
+    # first transfer from the secondary after that: unstripped, into a CE
+    later_secondary = ep_secondary & np.logical_not(first)
+    sec_seed, sec_first = np.unique(ep_seed[later_secondary], return_index=True)
+    sec_is_classic = np.logical_and(ep_cee[later_secondary][sec_first],
+                                    ep_type_2[later_secondary][sec_first] < 7)
+    classic_seeds = np.intersect1d(classic_or_OS_seeds, sec_seed[sec_is_classic])
     classic_mask = np.isin(seeds, classic_seeds)
 
-    # ONLY STABLE channel
-    # 1st transfer as classic, 2nd transfer unstripped secondary stable RLOF
-    only_stable_MT2 = np.logical_and.reduce((count == 2,
-                                             rlof_secondary,
-                                             np.logical_not(cee_flag),
-                                             stellar_type_2 < 7))
-    only_stable_seeds = np.intersect1d(rlof_seeds[classic_or_OS_MT1],
-                                       rlof_seeds[only_stable_MT2])
+    # never a CE at all
+    only_stable_seeds = np.setdiff1d(classic_or_OS_seeds, cee_seeds)
     only_stable_mask = np.isin(seeds, only_stable_seeds)
 
     # SINGLE CORE CEE channel
     # 1st transfer unstable, primary giant branch onto MS secondary
-    single_core = np.logical_and.reduce((count == 1,
-                                         rlof_primary,
-                                         cee_flag,
-                                         stellar_type_1 > 2,
-                                         stellar_type_1 < 7,
-                                         stellar_type_2 <= 1))
-    single_core_mask = np.isin(seeds, rlof_seeds[single_core])
+    single_core = np.logical_and.reduce((mt1_primary,
+                                         mt1_cee,
+                                         mt1_type_1 > 2,
+                                         mt1_type_1 < 7,
+                                         mt1_type_2 <= 1))
+    single_core_mask = np.isin(seeds, mt1_seed[single_core])
 
     # DOUBLE CORE CEE channel
     # 1st transfer unstable, primary giant branch onto giant branch secondary
-    double_core = np.logical_and.reduce((count == 1,
-                                         rlof_primary,
-                                         cee_flag,
-                                         stellar_type_1 > 2,
-                                         stellar_type_1 < 7,
-                                         stellar_type_2 > 2,
-                                         stellar_type_2 < 7))
-    double_core_mask = np.isin(seeds, rlof_seeds[double_core])
-    
+    double_core = np.logical_and.reduce((mt1_primary,
+                                         mt1_cee,
+                                         mt1_type_1 > 2,
+                                         mt1_type_1 < 7,
+                                         mt1_type_2 > 2,
+                                         mt1_type_2 < 7))
+    double_core_mask = np.isin(seeds, mt1_seed[double_core])
 
-    #####################################################
-    ####################### extra channels   ##########
-    #####################################################
-
-    all_cee_seeds = get_COMPAS_vars(file, 'BSE_Common_Envelopes', "SEED") 
-    ##  case A MT1 channel & CE 
-
-    # "flagRLOF1" is broken for case A mass transfer 
-    classic_caseA_MT1 = np.logical_and.reduce((count == 1,
-                                               np.logical_not(cee_flag),
-                                               stellar_type_1 == 1,
-                                               stellar_type_2 == 1))
-
-    ####################################################
-    ## only stable case A MT1 channel 
-    # 1st transfer as classic case A, 2nd transfer unstripped secondary stable RLOF
-    only_stable_caseA_seeds = rlof_seeds[classic_caseA_MT1] 
-    # np.isin(rlof_seeds[classic_caseA_MT1],
-                                   # all_cee_seeds, invert=True)
-    only_stable_caseA_mask = np.isin(seeds, only_stable_caseA_seeds)
-
-    # check if there is a CE, and overwrite these 
-    # 2nd transfer, unstripped secondary RLOF into CE
-    classic_caseA_seeds = np.isin(rlof_seeds[classic_caseA_MT1],
-                                   all_cee_seeds)
-    classic_caseA_mask = np.isin(seeds, classic_caseA_seeds)
-    
-
-    channels = np.zeros_like(seeds).astype(int)
+    channels = np.zeros(len(seeds), dtype=int)
     channels[classic_mask] = 1
     channels[only_stable_mask] = 2
     channels[single_core_mask] = 3
     channels[double_core_mask] = 4
-    channels[classic_caseA_mask] = 1 # classify case A same as original channel
-    channels[only_stable_caseA_mask] = 2 #  # classify case A same as original channel
 
-
-    other_channel_mask_CE = np.in1d(seeds, all_cee_seeds)
-    
-    # within the other channel, assign other without CE  as -2
-    mask_other_without_CE = (channels==0) & (other_channel_mask_CE==0)
-    channels[mask_other_without_CE] = -2
-
-    # within the other channel, assign other with CE  as -1
-    mask_other_with_CE = (channels==0) & (other_channel_mask_CE==1)
-    channels[mask_other_with_CE] = -1 
-
+    # everything else is 'other': -1 with a CE, -2 without
+    had_cee = np.isin(seeds, cee_seeds)
+    channels[(channels == 0) & had_cee] = -1
+    channels[(channels == 0) & ~had_cee] = -2
 
     return channels

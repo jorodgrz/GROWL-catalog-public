@@ -24,3 +24,14 @@ onboarding_growl/data/sspc/
 onboarding_growl/data/Riley_CHE_data/COMPAS_Output.zip
 onboarding_growl/data/vanSon2022_data/COMPAS_Output_wWeights.h5
 onboarding_growl/data/vanSon2022_data/COMPAS_Output_wWeights.tar.gz
+
+# GWTC-5.0 population data release (42 GB, Zenodo 10.5281/zenodo.20292639) -- never commit
+lvk_observations/GWtC-5/
+lvk_observations/GWTC-5/
+CosmicIntegration/sspc_output.h5
+
+# Notebook 1 exercise runs at other metallicities (regenerate with COMPAS) -- BSE_Detailed_Output_0.h5 stays tracked
+onboarding_growl/data/BSE_Detailed_Output_1.h5
+onboarding_growl/data/BSE_Detailed_Output_3.h5
+onboarding_growl/data/BSE_Detailed_Output_4.h5
+onboarding_growl/data/BSE_Detailed_Output_5.h5
